@@ -1,0 +1,23 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore environment config
+.env
+
+# Ignore system files
+.DS_Store
+
+# Ignore output and data artifacts
+outputs/
+*.parquet
+*.csv
+*.log
+
+# Ignore virtual environments
+venv/
+.env/
+.venv/
+
+# Jupyter/IPython (in case you use notebooks later)
+.ipynb_checkpoints/
