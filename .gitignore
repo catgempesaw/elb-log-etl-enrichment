@@ -21,3 +21,5 @@ venv/
 
 # Jupyter/IPython (in case you use notebooks later)
 .ipynb_checkpoints/
+
+/outputs
