@@ -1,0 +1,8 @@
+user-agents
+fastparquet
+boto3
+pandas
+numpy
+requests
+python-dotenv
+pytz
