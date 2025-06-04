@@ -23,3 +23,5 @@ venv/
 .ipynb_checkpoints/
 
 /outputs
+_common_metadata
+_metadata
