@@ -41,10 +41,13 @@ ELB_COLUMNS = [
 ]
 
 # Directory constants
-GEO_CACHE_PATH        = "output/ip_geolocation_cache.parquet"
-OUTPUT_CLEANED        = "output/cleaned_logs"
-OUTPUT_AGG            = "output/aggregated_stats"
-OUTPUT_REPORTS        = "output/reports"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+GEO_CACHE_PATH = os.path.join(BASE_DIR, "output/ip_geolocation_cache.parquet")
+OUTPUT_CLEANED = os.path.join(BASE_DIR, "output/cleaned_logs")
+OUTPUT_AGG = os.path.join(BASE_DIR, "output/aggregated_stats")
+OUTPUT_REPORTS = os.path.join(BASE_DIR, "output/reports")
+
+# Create directories if not exist
 os.makedirs(OUTPUT_CLEANED, exist_ok=True)
 os.makedirs(OUTPUT_AGG, exist_ok=True)
 os.makedirs(OUTPUT_REPORTS, exist_ok=True)
@@ -329,7 +332,7 @@ def optimize_dtypes(df):
 
 # --------------------------------------------------------------#
 # Output Functions
-def export_cleaned_logs(df, base_path="output/cleaned_logs"):
+def export_cleaned_logs(df, base_path=OUTPUT_CLEANED):
     df.to_parquet(
         base_path,
         partition_cols=["request_year", "request_month", "request_day", "countryCode"],
@@ -337,26 +340,28 @@ def export_cleaned_logs(df, base_path="output/cleaned_logs"):
     )
     print(f"✅ Cleaned logs saved to: {base_path}")
 
-def export_hourly_aggregates(df, output_path="output/aggregated_stats/hourly_traffic_by_geo.parquet"):
+def export_hourly_aggregates(df, output_path=OUTPUT_AGG + "/hourly_traffic_by_geo.parquet"):
+    # Perform aggregation
     agg = df.groupby([
-        "request_year", "request_month", "request_day", "request_hour",
-        "countryName", "city"
-    ]).agg(
-        request_count=('client_ip', 'count'),
-        unique_client_ips_count=('client_ip', 'nunique'),
-        average_total_processing_time=('total_processing_time', 'mean'),
-        median_total_processing_time=('total_processing_time', 'median'),
-        sum_sent_bytes=('sent_bytes', 'sum'),
-        sum_received_bytes=('received_bytes', 'sum'),
-        count_2xx=('status_code_type', lambda x: (x == "2xx_Success").sum()),
-        count_4xx=('status_code_type', lambda x: (x == "4xx_ClientError").sum()),
-        count_5xx=('status_code_type', lambda x: (x == "5xx_ServerError").sum()),
+        "request_year", "request_month", "request_day", "request_hour", "countryName", "city"
+    ], observed=True).agg(
+        request_count = ("client_ip", "count"),
+        unique_client_ips_count = ("client_ip", "nunique"),
+        average_total_processing_time = ("total_processing_time", "mean"),
+        median_total_processing_time = ("total_processing_time", "median"),
+        sum_sent_bytes = ("sent_bytes", "sum"),
+        sum_received_bytes = ("received_bytes", "sum"),
+        count_2xx = ("status_code_type", lambda x: (x == "2xx_Success").sum()),
+        count_4xx = ("status_code_type", lambda x: (x == "4xx_ClientError").sum()),
+        count_5xx = ("status_code_type", lambda x: (x == "5xx_ServerError").sum()),
     ).reset_index()
     
+
+    # Save to Parquet
     agg.to_parquet(output_path, index=False)
     print(f"📊 Aggregates saved to: {output_path}")
 
-def export_error_summary(df, output_path="output/reports/error_summary_geo.csv"):
+def export_error_summary(df, output_path=OUTPUT_REPORTS + "/error_summary_geo.csv"):
     err_df = df[df["status_code_type"].isin(["4xx_ClientError", "5xx_ServerError"])]
     cols = [
         "time", "client_ip", "city", "countryName", "isp", "http_method", "full_url",
@@ -366,11 +371,15 @@ def export_error_summary(df, output_path="output/reports/error_summary_geo.csv")
     err_df[cols].to_csv(output_path, index=False)
     print(f"❗ Error summary saved to: {output_path}")
     
-def export_bot_traffic(df, detail_path="output/reports/bot_traffic_details.parquet", summary_path="output/reports/bot_traffic_by_origin_summary.csv"):
+def export_bot_traffic(
+    df,
+    detail_path=os.path.join(OUTPUT_REPORTS, "bot_traffic_details.parquet"),
+    summary_path=os.path.join(OUTPUT_REPORTS, "bot_traffic_by_origin_summary.csv")
+):
     bots = df[df['is_bot'] == True]
     
     detail_cols = ["time", "client_ip", "city", "countryName", "isp", "full_url", "user_agent"]
-    summary = bots.groupby(["countryName", "isp"]).size().reset_index(name="bot_request_count")
+    summary = bots.groupby(["countryName", "isp"], observed=True).size().reset_index(name="bot_request_count")
 
     bots[detail_cols].to_parquet(detail_path, index=False)
     summary.to_csv(summary_path, index=False)
@@ -398,7 +407,7 @@ def main():
     for i, ip in enumerate(new_ips):
         print(f"📍[{i+1}/{len(new_ips)}] Looking up: {ip}")
         geo_results.append(fetch_geolocation_data(ip))
-        time.sleep(1)
+        time.sleep(.6)
     if geo_results:
         geo_cache = update_geolocation_cache(geo_results)
 
@@ -419,6 +428,6 @@ def main():
     export_hourly_aggregates(df_enriched)
     export_error_summary(df_enriched)
     export_bot_traffic(df_enriched)
-
+    
 if __name__ == "__main__":
     main()
