@@ -26,3 +26,4 @@ venv/
 _common_metadata
 _metadata
 logs.txt
+cron_test.txt

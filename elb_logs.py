@@ -119,7 +119,11 @@ def parse_log_line(line, source_file):
         ua = ua_parse(record['user_agent'].strip('"'))
         record['ua_browser_family'] = ua.browser.family or 'Other'
         record['ua_os_family'] = ua.os.family or 'Other'
-        record['is_bot'] = any(bot in record['user_agent'].lower() for bot in ['bot', 'crawler', 'spider', 'googlebot', 'python-urllib'])
+        bot_keywords = [
+            'bot', 'crawler', 'spider', 'googlebot', 'python-urllib',
+            'datadog', 'pingdom', 'uptimerobot', 'newrelic', 'monitoring', 'nagios'
+        ]
+        record['is_bot'] = any(bot in record['user_agent'].lower() for bot in bot_keywords)
 
         record['log_source_file'] = source_file
         return record
