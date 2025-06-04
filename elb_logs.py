@@ -40,10 +40,14 @@ ELB_COLUMNS = [
     'classification', 'classification_reason'
 ]
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUTS_DIR = os.path.join(BASE_DIR, 'outputs')
-os.makedirs(OUTPUTS_DIR, exist_ok=True)
-GEO_CACHE_PATH = os.path.join(OUTPUTS_DIR, 'ip_geolocation_cache.parquet')
+# Directory constants
+GEO_CACHE_PATH        = "output/ip_geolocation_cache.parquet"
+OUTPUT_CLEANED        = "output/cleaned_logs"
+OUTPUT_AGG            = "output/aggregated_stats"
+OUTPUT_REPORTS        = "output/reports"
+os.makedirs(OUTPUT_CLEANED, exist_ok=True)
+os.makedirs(OUTPUT_AGG, exist_ok=True)
+os.makedirs(OUTPUT_REPORTS, exist_ok=True)
 
 # Extract .gz log keys from S3
 def extract_log_keys(bucket, prefix=''):
@@ -116,7 +120,7 @@ def parse_log_line(line, source_file):
 def transform_logs(bucket, keys):
     parsed_logs = []
     for key in keys:
-        # print(f"📥 Processing: {key}")
+        print(f"- Processing: {key}")
         obj = s3.get_object(Bucket=bucket, Key=key)
         with gzip.GzipFile(fileobj=BytesIO(obj['Body'].read())) as gz:
             for line in gz:
@@ -251,7 +255,30 @@ def categorize_status(code):
     elif 400 <= code < 500: return '4xx_ClientError'
     elif 500 <= code < 600: return '5xx_ServerError'
     else: return 'Other'
-    
+
+# Rolling Aggregations
+def add_rolling_features(df):
+    df = df.sort_values(['client_ip', 'time'])
+
+    rolling_count = (
+        df.groupby('client_ip')
+          .rolling(window='5min', on='time')['request']
+          .count()
+          .rename('rolling_5min_request_count')
+          .reset_index()
+    )
+
+    rolling_avg = (
+        df.groupby('client_ip')
+          .rolling(window='1h', on='time')['total_processing_time']
+          .mean()
+          .rename('rolling_1h_avg_processing')
+          .reset_index()
+    )
+
+    df = df.merge(rolling_count, on=['client_ip', 'time'], how='left')
+    df = df.merge(rolling_avg, on=['client_ip', 'time'], how='left')
+    return df
 # --------------------------------------------------------------#
 # Feature Engineering & Advanced Transformations:
 def extract_time_features(df):
@@ -269,50 +296,129 @@ def calculate_processing_times(df):
     df['total_processing_time'] = df[cols].fillna(0).sum(axis=1)
     return df
 
-# def sessionize_logs(df)
+def sessionize_logs(df, session_gap_minutes=30):
+    df = df.sort_values(by=['client_ip', 'time'])
+    df['time_diff'] = df.groupby('client_ip')['time'].diff().fillna(pd.Timedelta(seconds=0))
+    df['new_session'] = df['time_diff'] > pd.Timedelta(minutes=session_gap_minutes)
+    df['session_number'] = df.groupby('client_ip')['new_session'].cumsum()
+    df['session_id'] = df['client_ip'] + '_s' + df['session_number'].astype(str)
+    return df
+
+# Request Path Analysis
+def add_path_features(df):
+    df['path_depth'] = df['path'].fillna('').apply(lambda x: len([seg for seg in x.split('/') if seg]))
+
+    # Extract main path segment (the first segment of the path).
+    df['path_main_segment'] = df['path'].fillna('').apply(lambda x: x.split('/')[1] if len(x.split('/')) > 1 else '')
+    return df
+
+# Data Type Optimization
+def optimize_dtypes(df):
+    int_cols = df.select_dtypes(include=['int64']).columns
+    float_cols = df.select_dtypes(include=['float64']).columns
+
+    df[int_cols] = df[int_cols].apply(pd.to_numeric, downcast='integer')
+    df[float_cols] = df[float_cols].apply(pd.to_numeric, downcast='float')
+
+    # Convert low-cardinality strings to category
+    cat_candidates = ['http_method', 'status_code_type', 'countryCode', 'countryName', 'ua_browser_family', 'ua_os_family']
+    for col in cat_candidates:
+        if col in df.columns:
+            df[col] = df[col].astype('category')
+    return df
 
 # --------------------------------------------------------------#
+# Output Functions
+def export_cleaned_logs(df, base_path="output/cleaned_logs"):
+    df.to_parquet(
+        base_path,
+        partition_cols=["request_year", "request_month", "request_day", "countryCode"],
+        index=False
+    )
+    print(f"✅ Cleaned logs saved to: {base_path}")
 
-# Main 
-print("Starting ELB log transformation and geolocation")
+def export_hourly_aggregates(df, output_path="output/aggregated_stats/hourly_traffic_by_geo.parquet"):
+    agg = df.groupby([
+        "request_year", "request_month", "request_day", "request_hour",
+        "countryName", "city"
+    ]).agg(
+        request_count=('client_ip', 'count'),
+        unique_client_ips_count=('client_ip', 'nunique'),
+        average_total_processing_time=('total_processing_time', 'mean'),
+        median_total_processing_time=('total_processing_time', 'median'),
+        sum_sent_bytes=('sent_bytes', 'sum'),
+        sum_received_bytes=('received_bytes', 'sum'),
+        count_2xx=('status_code_type', lambda x: (x == "2xx_Success").sum()),
+        count_4xx=('status_code_type', lambda x: (x == "4xx_ClientError").sum()),
+        count_5xx=('status_code_type', lambda x: (x == "5xx_ServerError").sum()),
+    ).reset_index()
+    
+    agg.to_parquet(output_path, index=False)
+    print(f"📊 Aggregates saved to: {output_path}")
 
-# 1: Load and parse logs
-df = transform_logs(s3_bucket, extract_log_keys(s3_bucket, prefix))
+def export_error_summary(df, output_path="output/reports/error_summary_geo.csv"):
+    err_df = df[df["status_code_type"].isin(["4xx_ClientError", "5xx_ServerError"])]
+    cols = [
+        "time", "client_ip", "city", "countryName", "isp", "http_method", "full_url",
+        "elb_status_code", "target_status_code_list", "user_agent",
+        "ua_browser_family", "ua_os_family", "error_reason"
+    ]
+    err_df[cols].to_csv(output_path, index=False)
+    print(f"❗ Error summary saved to: {output_path}")
+    
+def export_bot_traffic(df, detail_path="output/reports/bot_traffic_details.parquet", summary_path="output/reports/bot_traffic_by_origin_summary.csv"):
+    bots = df[df['is_bot'] == True]
+    
+    detail_cols = ["time", "client_ip", "city", "countryName", "isp", "full_url", "user_agent"]
+    summary = bots.groupby(["countryName", "isp"]).size().reset_index(name="bot_request_count")
 
-# 2: Load existing cache
-geo_cache = load_geolocation_cache()
+    bots[detail_cols].to_parquet(detail_path, index=False)
+    summary.to_csv(summary_path, index=False)
+    
+    print(f"🤖 Bot details saved to: {detail_path}")
+    print(f"📈 Bot summary saved to: {summary_path}")
+# --------------------------------------------------------------#
+# Main ETL Process
+def main():
+    print("Starting ELB log transformation and geolocation")
 
-# 3: Identify new unique IPs
-unique_ips = df['client_ip'].unique()
-new_ips = [ip for ip in unique_ips if ip not in geo_cache.index]
-print(f"🆕 Found {len(new_ips)} IPs needing geolocation lookup.")
+    # Step 1: Load and parse logs
+    df = transform_logs(s3_bucket, extract_log_keys(s3_bucket, prefix))
 
-# 4: Fetch geolocation for new IPs
-geo_results = []
-for i, ip in enumerate(new_ips):
-    print(f"📍[{i+1}/{len(new_ips)}] Looking up: {ip}")
-    geo_results.append(fetch_geolocation_data(ip))
-    time.sleep(1.6) 
+    # Step 2: Load existing cache
+    geo_cache = load_geolocation_cache()
 
-# 5: Update and save the cache with new geolocation data
-if geo_results:
-    geo_cache = update_geolocation_cache(geo_results)
+    # Step 3: Identify new IPs
+    unique_ips = df['client_ip'].unique()
+    new_ips = [ip for ip in unique_ips if ip not in geo_cache.index]
+    print(f"🆕 Found {len(new_ips)} IPs needing geolocation lookup.")
 
-# 6: Merge geocached DataFrame with ELB DataFrame
-df_enriched = merge_geocachedf_with_elbdf(df, geo_cache)
-print(f"Merged geolocation data into ELB DataFrame. Total rows: {len(df_enriched)}")
+    # Step 4: Fetch new geolocations
+    geo_results = []
+    for i, ip in enumerate(new_ips):
+        print(f"📍[{i+1}/{len(new_ips)}] Looking up: {ip}")
+        geo_results.append(fetch_geolocation_data(ip))
+        time.sleep(1)
+    if geo_results:
+        geo_cache = update_geolocation_cache(geo_results)
 
-# 7: Filter and categorize DataFrame
-df_enriched = filter_categorize_df(df_enriched)
+    # Step 5: Merge and filter
+    df_enriched = merge_geocachedf_with_elbdf(df, geo_cache)
+    df_enriched = filter_categorize_df(df_enriched)
 
-# Print for testing
-print("✅ Final sample output:")
-print(df_enriched[['client_ip', 'city', 'countryName', 'status_code_type', 'waf_blocked']].head(50))
+    # Step 6: Feature engineering
+    df_enriched = extract_time_features(df_enriched)
+    df_enriched = calculate_processing_times(df_enriched)
+    df_enriched = sessionize_logs(df_enriched)
+    df_enriched = add_rolling_features(df_enriched)
+    df_enriched = add_path_features(df_enriched)
+    df_enriched = optimize_dtypes(df_enriched)
 
-# 8: Feature Engineering
-df_enriched = extract_time_features(df_enriched)
-df_enriched = calculate_processing_times(df_enriched)
+    # Step 7: Output
+    export_cleaned_logs(df_enriched)
+    export_hourly_aggregates(df_enriched)
+    export_error_summary(df_enriched)
+    export_bot_traffic(df_enriched)
 
-
-
-
+if __name__ == "__main__":
+    main()
