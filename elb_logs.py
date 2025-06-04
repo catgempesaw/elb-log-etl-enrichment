@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import requests
 import time
+import logging
 
 from io import BytesIO
 from urllib.parse import urlparse
@@ -15,6 +16,15 @@ from dotenv import load_dotenv
 from user_agents import parse as ua_parse
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    filename="logs.txt",
+    filemode='w'
+)
+logger = logging.getLogger(__name__)
 
 # Set up AWS S3 client 
 s3 = boto3.client(
@@ -56,10 +66,6 @@ os.makedirs(OUTPUT_REPORTS, exist_ok=True)
 def extract_log_keys(bucket, prefix=''):
     response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
     keys = [obj['Key'] for obj in response.get('Contents', []) if obj['Key'].endswith('.gz')]
-
-    # print(f"Found {len(keys)} log file(s) in S3 bucket '{bucket}' with prefix '{prefix}':")
-    # for key in keys:
-    #     print(f" - {key}")
     return keys
 
 # Parse a single ELB log line
@@ -116,14 +122,14 @@ def parse_log_line(line, source_file):
         record['log_source_file'] = source_file
         return record
     except Exception as e:
-        print(f"Failed to parse line in {source_file}: {e}")
+        logger.warning(f"Failed to parse line in {source_file}: {e}")
         return None
 
 # Transform log files into a DataFrame
 def transform_logs(bucket, keys):
     parsed_logs = []
     for key in keys:
-        print(f"- Processing: {key}")
+        logger.info(f"✅ Processing: {key}")
         obj = s3.get_object(Bucket=bucket, Key=key)
         with gzip.GzipFile(fileobj=BytesIO(obj['Body'].read())) as gz:
             for line in gz:
@@ -131,7 +137,7 @@ def transform_logs(bucket, keys):
                 if parsed:
                     parsed_logs.append(parsed)
     df = pd.DataFrame(parsed_logs)
-    print(f"Parsed {len(df)} rows from {len(keys)} files.")
+    logger.info(f"✅ Parsed {len(df)} rows from {len(keys)} files.")
     return df
 
 # GEOLOCATION : Load parquet cache if available
@@ -157,7 +163,7 @@ def fetch_geolocation_data(new_ip):
     try:
         response = requests.get(url, timeout=5)
         data = response.json()
-        print(f"🌍 Geolocation data for {new_ip}: {data}")
+        logger.info(f"✅ Geolocation data for {new_ip}: {data}")
         if data['status'] == 'success':
             return {
                 'client_ip': data['query'],
@@ -183,7 +189,7 @@ def fetch_geolocation_data(new_ip):
                 'api_fetch_timestamp': pd.Timestamp.now()
             }
     except Exception as e:
-        print(f"Error fetching geolocation for {new_ip}: {e}")
+        logger.error(f"Error fetching geolocation for {new_ip}: {e}")
         return {
             'client_ip': new_ip,
             'countryCode': "Error",
@@ -199,16 +205,12 @@ def fetch_geolocation_data(new_ip):
 # GEOLOCATION: Update and save new geolocation entries
 def update_geolocation_cache(new_geo_entry, cache_path=GEO_CACHE_PATH):
     geo_cache = load_geolocation_cache()
-    print("CACHE:", geo_cache)
-    
+        
     # If single result (dict), wrap in list
     if isinstance(new_geo_entry, dict):
         new_geo_entry = [new_geo_entry]
     
     new_geo_df = pd.DataFrame(new_geo_entry).set_index('client_ip')
-    
-    print("NEW GEO:", new_geo_df)
-    
     updated_cache = pd.concat([geo_cache, new_geo_df])
     
     # Drop duplicates by client_ip, keeping the most recent
@@ -216,7 +218,7 @@ def update_geolocation_cache(new_geo_entry, cache_path=GEO_CACHE_PATH):
     updated_cache = updated_cache[~updated_cache.index.duplicated(keep='first')]
     updated_cache.to_parquet(cache_path)
 
-    print("✅ Geolocation cache updated and saved.")
+    logger.info("✅ Geolocation cache updated and saved.")
     return updated_cache
 
 # Merge geocached DataFrame with ELB DataFrame
@@ -338,10 +340,9 @@ def export_cleaned_logs(df, base_path=OUTPUT_CLEANED):
         partition_cols=["request_year", "request_month", "request_day", "countryCode"],
         index=False
     )
-    print(f"✅ Cleaned logs saved to: {base_path}")
+    logger.info(f"✅ Cleaned logs saved to: {base_path}")
 
 def export_hourly_aggregates(df, output_path=OUTPUT_AGG + "/hourly_traffic_by_geo.parquet"):
-    # Perform aggregation
     agg = df.groupby([
         "request_year", "request_month", "request_day", "request_hour", "countryName", "city"
     ], observed=True).agg(
@@ -356,10 +357,9 @@ def export_hourly_aggregates(df, output_path=OUTPUT_AGG + "/hourly_traffic_by_ge
         count_5xx = ("status_code_type", lambda x: (x == "5xx_ServerError").sum()),
     ).reset_index()
     
-
     # Save to Parquet
     agg.to_parquet(output_path, index=False)
-    print(f"📊 Aggregates saved to: {output_path}")
+    logger.info(f"✅ Aggregates saved to: {output_path}")
 
 def export_error_summary(df, output_path=OUTPUT_REPORTS + "/error_summary_geo.csv"):
     err_df = df[df["status_code_type"].isin(["4xx_ClientError", "5xx_ServerError"])]
@@ -369,7 +369,7 @@ def export_error_summary(df, output_path=OUTPUT_REPORTS + "/error_summary_geo.cs
         "ua_browser_family", "ua_os_family", "error_reason"
     ]
     err_df[cols].to_csv(output_path, index=False)
-    print(f"❗ Error summary saved to: {output_path}")
+    logger.info(f"✅ Error summary saved to: {output_path}")
     
 def export_bot_traffic(
     df,
@@ -384,12 +384,13 @@ def export_bot_traffic(
     bots[detail_cols].to_parquet(detail_path, index=False)
     summary.to_csv(summary_path, index=False)
     
-    print(f"🤖 Bot details saved to: {detail_path}")
-    print(f"📈 Bot summary saved to: {summary_path}")
+    logger.info(f"✅ Bot details saved to: {detail_path}")
+    logger.info(f"✅ Bot summary saved to: {summary_path}")
 # --------------------------------------------------------------#
+
 # Main ETL Process
 def main():
-    print("Starting ELB log transformation and geolocation")
+    logger.info("Starting ELB log transformation and geolocation")
 
     # Step 1: Load and parse logs
     df = transform_logs(s3_bucket, extract_log_keys(s3_bucket, prefix))
@@ -400,12 +401,12 @@ def main():
     # Step 3: Identify new IPs
     unique_ips = df['client_ip'].unique()
     new_ips = [ip for ip in unique_ips if ip not in geo_cache.index]
-    print(f"🆕 Found {len(new_ips)} IPs needing geolocation lookup.")
+    logger.info(f"✅ Found {len(new_ips)} IPs needing geolocation lookup.")
 
     # Step 4: Fetch new geolocations
     geo_results = []
     for i, ip in enumerate(new_ips):
-        print(f"📍[{i+1}/{len(new_ips)}] Looking up: {ip}")
+        logger.info(f"📍[{i+1}/{len(new_ips)}] Looking up: {ip}")
         geo_results.append(fetch_geolocation_data(ip))
         time.sleep(.6)
     if geo_results:
