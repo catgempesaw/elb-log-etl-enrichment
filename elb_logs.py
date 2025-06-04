@@ -21,8 +21,10 @@ load_dotenv()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    filename="logs.txt",
-    filemode='w'
+    handlers=[
+        logging.FileHandler("logs.txt", mode="w"),
+        logging.StreamHandler()  # <-- This logs to terminal
+    ]
 )
 logger = logging.getLogger(__name__)
 
