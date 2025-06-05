@@ -1,5 +1,22 @@
-# Advanced Exercise: AWS ELB Logs Transformation & Optimized Dynamic Enrichment
+## Project Overview: ELB Log Transformation & Enrichment
 
-Scenario: You are a Data Engineer tasked with a comprehensive analysis of web traffic patterns and potential issues using AWS Elastic Load Balancer (ELB) access logs. These logs are stored in an S3 bucket and require significant transformation and dynamic enrichment. To optimize external API calls, you'll implement a caching strategy for geolocation data.
+This project demonstrates an advanced data engineering task focused on analyzing AWS Elastic Load Balancer (ELB) access logs stored in S3. The goal is to process these logs for insights into web traffic patterns and potential issues.
 
-Goal: Write a Python script using Pandas to ingest, clean, transform, and dynamically enrich (via a web API with a local cache) raw AWS ELB access logs, and then aggregate the results. The output should consist of multiple structured datasets ready for different types of analysis.
+### Scenario
+
+As a Data Engineer, you're responsible for building a Python ETL pipeline that:
+
+- Ingests ELB logs from S3
+- Cleans and transforms the data
+- Enriches logs with IP geolocation via a web API
+- Implements **local caching** to optimize API calls
+- Outputs structured datasets for analysis
+
+### Goals
+
+- Use **Pandas** for parsing and transformations  
+- Cache API responses to avoid redundant lookups  
+- Export multiple outputs: cleaned logs, bot traffic summaries, error reports, and aggregations  
+- Automate the ETL process via a **cron job**  
+- Implement robust **logging** for traceability  
+- Validate logic with **pytest** unit tests  
